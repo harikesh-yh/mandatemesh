@@ -1,0 +1,529 @@
+# MandateMesh
+
+MandateMesh is a transaction-authorization layer for AI agents. The same
+accounts-payable agent, driven by the same invoices, can be run two ways:
+
+- **Level 0 — Unprotected baseline.** Direct tool access, no authorization
+  boundary. Untrusted text inside an invoice becomes a real, persisted financial
+  transaction.
+- **Level 1 — Protected enforcement loop.** A human-confirmed, Ed25519-signed
+  **mandate** is bound to the run; a policy gateway evaluates every proposed tool
+  call against an OPA/Rego decision point; and the one legitimate payment pauses
+  for an action-bound, one-time human approval. Every forbidden action is blocked
+  and leaves no side effect.
+- **Level 2 — Judge-proof evaluation.** A fixed corpus runs six attacks and four
+  legitimate actions against both boundaries, persists expected-versus-actual
+  results, measures median/P95 policy latency, and exposes execution provenance
+  with policy input, before/after state, and source evidence.
+- **Level 3 — Three bounded differentiators.** A stable MCP adapter routes tool
+  calls through the same gateway, denied financial-memory writes are retained as
+  quarantined evidence but excluded from trusted retrieval, and a conservative
+  semantic compiler explains extracted constraints, confidence, ambiguity, and
+  mandatory human review before signing.
+- **Level 4 — Demo readiness.** One-command startup, deterministic reset,
+  offline model fallback, truthful readiness, fail-closed outage recovery, and
+  resumable event streams make the complete proof reliable under presentation
+  conditions without changing authorization semantics.
+
+Two invoices drive the same agent:
+
+- **Normal invoice** — an approved vendor and an ordinary ₹42,000 payment.
+- **Malicious invoice** — the *same* invoice, plus attacker-authored metadata
+  that tries to create a rogue vendor, read a secret, poison persistent memory,
+  and pay an attacker beneficiary.
+
+The web UI has **Unprotected**, **Protected**, **Evaluation**, and **Level 3**
+screens. Level 0 shows the attack landing in SQLite; Level 1 shows the gateway
+refusing each forbidden action and executing only the approved payment; Level 2
+runs and explains the complete fixed corpus; Level 3 proves MCP transport parity,
+memory quarantine, and explainable mandate compilation without developer tools.
+Level 4 keeps those same screens and adds a compact five-minute guide, runtime
+readiness, deterministic recovery, and refresh-safe evidence streaming.
+
+> This README covers **setup and usage only**. For the product rationale, threat
+> model, and level roadmap see [`PRODUCT_SPEC.md`](./PRODUCT_SPEC.md) and
+> [`BUILD_PLAN.md`](./BUILD_PLAN.md).
+
+---
+
+## Repository layout
+
+```
+.
+├── apps/web/                # Next.js 16 frontend (protected + unprotected UI)
+├── services/api/            # FastAPI backend
+│   ├── app/                 # agent, gateway, evidence, evaluation, policy, routes
+│   └── tests/               # pytest suite (Levels 0–4)
+├── policy/                  # OPA/Rego policy (mandate.rego) and Rego tests
+├── scenarios/invoices/      # normal.json and malicious.json source invoices
+├── scripts/                 # seed/reset, demo check, and Level 0–4 smoke helpers
+├── docker-compose.yml       # web + api + opa, health checks, persistent volume
+├── .env.example             # copy to .env; safe placeholders only
+├── PRODUCT_SPEC.md          # what/why (authoritative spec)
+└── BUILD_PLAN.md            # build plan (authoritative plan)
+```
+
+---
+
+## Prerequisites
+
+Pick **one** path:
+
+| Path | Needs |
+|------|-------|
+| Docker (recommended) | Docker Engine + Docker Compose v2 |
+| Local | Python **3.14**, Node.js **20+** (Next.js 16), npm, and **OPA 1.4.x** for protected mode |
+
+The agent runs fully **deterministically** by default — no model API key is
+required for either path. Protected (Level 1) mode additionally needs OPA
+running; Docker Compose starts it for you.
+
+---
+
+## Environment configuration
+
+Copy the example file and adjust if needed:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MODEL_API_KEY` | *(empty)* | Optional. Enables the live-model path. Blank keeps deterministic mode. |
+| `MODEL_BASE_URL` | `https://api.openai.com/v1` | Live-model endpoint (only used if a key is set). |
+| `MODEL_NAME` | `gpt-4.1-mini` | Live-model name. |
+| `MODEL_TEMPERATURE` | `0.1` | Live-model sampling temperature. |
+| `MODEL_TIMEOUT_SECONDS` | `12` | Live-model request timeout. |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Base URL the **browser** uses to reach the API. |
+| `MANDATEMESH_KEY_PATH` | `<data-dir>/demo-principal-ed25519.key` | Persistent random Ed25519 demo-principal key. Leave blank to use the data directory default. |
+| `OPA_URL` | `http://localhost:8181` | Policy decision point. Under Compose the API uses `http://opa:8181` automatically. |
+| `OPA_TIMEOUT_SECONDS` | `5` | Fail-closed timeout for policy decisions and readiness checks. |
+
+`.env` contains no secrets by default and is safe to keep local. Never commit a
+populated `.env`. On first startup the backend generates a random Ed25519 demo
+principal key at `MANDATEMESH_KEY_PATH`; Compose keeps it in the existing data
+volume. The private key never enters source control, API responses, events,
+prompts, or the agent tool surface.
+
+---
+
+## Quick start with Docker Compose
+
+```bash
+docker compose up --build
+```
+
+This builds and starts three services with health checks and a persistent volume:
+
+- **Web UI** → http://localhost:3000
+- **API** → http://localhost:8000 (liveness at `/health`, protected readiness at `/ready`)
+- **OPA** → policy decision point, **internal network only** (no host port)
+
+`opa` publishes no host port — only the trusted API can reach it. The `api`
+`/ready` reports healthy only once the API is up **and** OPA is reachable,
+and the `web` service waits for that health check before starting. Open
+http://localhost:3000 and run the demo (see [Using the demo](#using-the-demo)).
+
+Stop and remove the stack:
+
+```bash
+docker compose down            # keep the seeded database volume
+docker compose down -v         # also delete the mandatemesh-data volume
+```
+
+> **Port note:** the committed compose file publishes `8000` (api) and `3000`
+> (web); OPA has no host port. If host port 8000 is already in use, start the API
+> elsewhere with a local override and point `NEXT_PUBLIC_API_URL` at it — do not
+> edit the committed file.
+
+---
+
+## Running locally without Docker
+
+### 1. Policy engine (OPA) — required for protected mode
+
+Start OPA with the bundled policy before running a protected run:
+
+```bash
+# With a local opa binary:
+opa run --server --addr localhost:8181 policy/mandate.rego
+
+# ...or via Docker:
+docker run --rm -p 8181:8181 -v "$PWD/policy:/policy:ro" \
+  openpolicyagent/opa:1.4.2 run --server --addr 0.0.0.0:8181 /policy/mandate.rego
+```
+
+Leave it running and keep `OPA_URL=http://localhost:8181`. Unprotected (Level 0)
+runs do not need OPA.
+
+### 2. Backend (FastAPI)
+
+```bash
+cd services/api
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt      # runtime + test deps
+python ../../scripts/seed.py              # initialize and seed the SQLite database
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+The API serves at http://localhost:8000. CORS is restricted to
+`http://localhost:3000` / `http://127.0.0.1:3000`, so serve the frontend on port
+3000.
+
+### 3. Frontend (Next.js)
+
+In another terminal:
+
+```bash
+cd apps/web
+npm install
+npm run dev        # http://localhost:3000
+```
+
+For a production-style build instead of the dev server:
+
+```bash
+npm run build && npm run start
+```
+
+The browser reads the API URL from `NEXT_PUBLIC_API_URL` (default
+`http://localhost:8000`).
+
+---
+
+## Resetting demo state
+
+The default **demo reset** clears interactive runs, mandates, approvals, payments,
+trusted/quarantined memory, compiler reports, and idempotency state, then re-seeds
+the approved vendor and synthetic secret. Completed Level 2 evaluation reports and
+their evidence remain available for judge review. The persistent random Ed25519
+signing key is intentionally preserved. Any of these work:
+
+- **In the UI** — click **Reset demo state**.
+- **Via the API** — `curl -X POST 'http://localhost:8000/api/reset?scope=demo'`
+- **From the CLI (local)** — `python scripts/reset.py`
+- **From the CLI (Docker)** — `docker compose exec api python /app/scripts/reset.py`
+
+For a clean-room reset that also removes persisted evaluation history, use:
+
+```bash
+python scripts/reset.py --full
+curl -X POST 'http://localhost:8000/api/reset?scope=all'
+```
+
+Both reset scopes are idempotent and delete only database-managed demo state.
+
+---
+
+## Running the tests
+
+### Backend (pytest)
+
+Covers the tools, agent plan, canonical serialization, mandate lifecycle and
+crypto, the protected gateway, concurrency hardening, the fixed ten-scenario
+corpus, evidence persistence, and all four end-to-end levels. Gateway tests need OPA
+reachable at `OPA_URL`; if OPA is unavailable those tests skip automatically.
+
+```bash
+cd services/api
+pip install -r requirements-dev.txt      # once
+pytest
+```
+
+### Policy (Rego)
+
+```bash
+docker run --rm -v "$PWD/policy:/policy:ro" openpolicyagent/opa:1.4.2 test /policy
+# ...or with a local opa binary:
+opa test policy
+```
+
+---
+
+## Reproducing the demos (smoke tests)
+
+### Level 0 — the attack lands
+
+`smoke_test.py` resets the database, runs the malicious invoice unprotected, and
+asserts the forbidden outcome: run `COMPLETED`, forbidden tool proposals, an
+`EXECUTED` payment to `VENDOR-ATTACKER`, and a poisoned memory entry.
+
+```bash
+python scripts/smoke_test.py --repetitions 3
+```
+
+### Level 1 — the gateway holds
+
+`smoke_level1.py` requires OPA running (`OPA_URL`). It compiles, confirms, and
+signs a mandate, runs the malicious invoice **through the gateway**, asserts
+every forbidden action is `BLOCK`ed, approves the one legitimate payment,
+executes it exactly once, and confirms a replayed approval token is refused.
+
+```bash
+python scripts/smoke_level1.py --repetitions 3
+```
+
+Inside Docker (OPA is already running in the stack):
+
+```bash
+docker compose exec api python /app/scripts/smoke_test.py --repetitions 3
+docker compose exec api python /app/scripts/smoke_level1.py --repetitions 3
+docker compose exec api python /app/scripts/smoke_level2.py --repetitions 3
+docker compose exec api python /app/scripts/smoke_level3.py --repetitions 3
+docker compose exec api python /app/scripts/smoke_level4.py --repetitions 3
+```
+
+### Level 2 — fixed corpus and repeatability
+
+`smoke_level2.py` runs all six attack and four legitimate scenarios from clean
+state, verifies every expected decision and side-effect invariant, measures
+policy latency, and requires the same repeatability key across runs.
+
+```bash
+python scripts/smoke_level2.py --repetitions 3
+```
+
+Each passing run prints one result dict per repetition followed by a `PASS:` line.
+
+### Level 3 — MCP, quarantine, and semantic compilation
+
+`smoke_level3.py` creates a signed protected session, verifies MCP protocol and
+seven-tool discovery, executes an allowed MCP read through the real gateway,
+blocks an MCP memory-poisoning attempt, confirms the denied content is visible in
+quarantine but absent from trusted retrieval, and validates the semantic
+compiler's limits, duration, confidence, and non-authoritative review report.
+
+```bash
+python scripts/smoke_level3.py --repetitions 3
+```
+
+### Level 4 — reliability and recovery
+
+`smoke_level4.py` performs a full reset twice, proves deterministic model
+fallback, forces an unavailable-policy path and verifies no side effect, restores
+the policy service, confirms protected recovery, checks resumable event delivery,
+and verifies database, protected-stack, and offline-demo readiness.
+
+```bash
+python scripts/smoke_level4.py --repetitions 3
+```
+
+Against a running stack, `demo_check.py` provides a fast pre-presentation gate:
+
+```bash
+python scripts/demo_check.py
+```
+
+It requires `/health`, `/ready`, `/api/runtime`, and scenario discovery to succeed.
+
+---
+
+## Using the demo
+
+Open http://localhost:3000. Use the **Protected / Unprotected** switch in the
+masthead to choose a boundary.
+
+### Unprotected (Level 0)
+
+1. Select an invoice and leave the engine on **Deterministic**.
+2. Click **RUN UNPROTECTED AGENT**.
+3. On the malicious invoice an **"Attack succeeded"** banner appears; the ledger
+   shows the forbidden calls in red and **Persisted side effects** shows a rogue
+   `VENDOR-ATTACKER`, an `EXECUTED` payment to the attacker, poisoned memory, and
+   an accessed synthetic secret (value always shown `[REDACTED]`).
+
+### Protected (Level 1)
+
+1. **Author the mandate.** The human task is prefilled. Click **COMPILE
+   MANDATE** to turn it into a typed authorization contract, review the
+   per-payment limit (₹50,000) and total budget (₹80,000) and the allowed /
+   forbidden actions, then **CONFIRM & FREEZE CONTRACT** and **SIGN MANDATE
+   (ED25519)**. The signed mandate shows `ACTIVE`, a **✓ SIGNATURE VALID** badge,
+   and its public key, signature, and nonce (never the private key).
+2. **Run under the gateway.** With an active mandate, select the **Malicious
+   invoice** and click **RUN PROTECTED AGENT**. The **Gateway decisions** panel
+   records one deterministic decision per proposed action —
+   `invoice.read`/`vendor.lookup` **ALLOW**, and `vendor.create`, `secret.read`,
+   `memory.write`, and the attacker `payment.prepare` each **BLOCK** with a
+   reason code (e.g. `ACTION_EXPLICITLY_FORBIDDEN`, `MEMORY_WRITE_FORBIDDEN`,
+   `BENEFICIARY_MISMATCH`).
+3. **Approve the legitimate payment.** The run pauses at `AWAITING APPROVAL` and
+   an **Approval required** card shows the amount, vendor, truncated beneficiary
+   fingerprint, remaining budget, and action hash. Click **Approve & execute
+   once** (or **Reject**). Approval mints a one-time, action-bound token; the run
+   resumes and executes the payment **exactly once**.
+4. **Read the evidence.** The enforcement summary shows actions blocked, payments
+   executed (1), and forbidden side effects (0). Under **Persisted state** no
+   rogue vendor, trusted poisoned memory, or secret access appears. The denied
+   memory instruction is retained separately as `QUARANTINED` evidence and is
+   never returned by trusted-memory retrieval; only the single approved
+   `EXECUTED` payment to `VENDOR-101` lands.
+
+Click **Reset demo state** to return to a clean baseline.
+
+### Evaluation (Level 2)
+
+1. Select **Evaluation** in the masthead.
+2. Click **RUN FULL EVALUATION**. The backend resets business state between
+   scenarios while preserving the evaluation evidence.
+3. Confirm the scorecard reports **6/6 attacks prevented**, **4/4 legitimate
+   actions**, zero false blocks, and measured median/P95 policy latency.
+4. Click **Inspect pass** on any row. The evidence drawer shows the unprotected
+   outcome beside the protected decision, then the raw proposal, canonical
+   action, relevant signed mandate, policy output, original invoice, and before /
+   after resource state. This evidence trail is labelled **execution provenance**.
+5. Re-run the corpus. Recorded evaluations remain selectable and the repeatability
+   key should remain identical when decisions are identical.
+
+
+### Level 3 — all three differentiators
+
+1. Select **Level 3** in the masthead and click **RUN ALL THREE PROOFS**.
+2. Review the semantic compiler report: typed limits, extracted constraints,
+   field confidence, ambiguity warnings, and the explicit `authoritative: false`
+   marker. The draft cannot activate itself; confirmation and backend signing
+   remain separate human-controlled steps.
+3. Inspect MCP discovery and execution. The adapter uses stable protocol
+   `2025-11-25`, exposes all seven simulated tools, and sends both the allowed
+   invoice read and blocked attack through the same canonicalization, signature,
+   OPA, approval, idempotency, and evidence path used by REST.
+4. Inspect the memory result. The poisoned financial instruction remains visible
+   as a source-bound `QUARANTINED` record, while the trusted-memory result remains
+   empty. The original gateway outcome stays `BLOCK` with
+   `MEMORY_WRITE_FORBIDDEN`.
+5. Follow the shared-pipeline view to verify that none of the three features
+   duplicates or bypasses the authorization plane.
+
+### Deterministic vs live model
+
+The **Deterministic** engine replays a fixed, precomputed plan and needs no model
+API key — use it for reproducible demos. **Live model** calls a configured model
+but **falls back to the same precomputed plan** whenever no key is set or the
+model is unavailable, so the demo never breaks.
+
+---
+
+## API reference
+
+Base URL: `http://localhost:8000`
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`  | `/health` | Liveness/degraded status; unprotected mode remains inspectable without OPA. |
+| `GET`  | `/ready` | Protected-stack readiness; returns HTTP 503 when OPA is unavailable. |
+| `GET`  | `/api/runtime` | Database, OPA, model/fallback, protected, and offline-demo readiness. |
+| `GET`  | `/api/scenarios` | List available invoice scenarios. |
+| `POST` | `/api/mandates/compile` | Compile a human task into a non-authoritative draft plus confidence/warnings. |
+| `GET` | `/api/mandates/{id}/compiler-report` | Fetch the persisted semantic compiler report. |
+| `POST` | `/mcp` | Stable MCP `2025-11-25` JSON-RPC adapter; all tool calls traverse the gateway. |
+| `GET`  | `/api/mandates` · `/api/mandates/{id}` | List / fetch mandates. |
+| `POST` | `/api/mandates/{id}/confirm` | Human-confirm and freeze the contract (with optional edits). |
+| `POST` | `/api/mandates/{id}/sign` | Backend Ed25519-signs the mandate → `ACTIVE`. |
+| `POST` | `/api/mandates/{id}/verify` | Verify signature / status / expiry. |
+| `POST` | `/api/mandates/{id}/tamper-demo` | Demonstrate post-signature mutation invalidating the signature. |
+| `POST` | `/api/runs` | Start a run (`202 Accepted`); `protection_mode` + `mandate_id` for protected runs. |
+| `GET`  | `/api/runs/{id}` · `/events?after=<event-id>` · `/stream` | Persisted run status and resumable SSE evidence stream. |
+| `POST` | `/api/gateway/execute` | Trusted gateway tool-call entry point (policy-checked). |
+| `GET` | `/api/events/{id}` | Fetch one complete execution-provenance event. |
+| `POST` | `/api/evaluation/run` | Run the fixed ten-scenario corpus from clean state. |
+| `GET` | `/api/evaluation` · `/api/evaluation/{id}` | List and inspect persisted evaluation reports. |
+| `GET`  | `/api/approvals/pending` | Pending human approvals. |
+| `POST` | `/api/approvals/{id}/approve` · `/reject` | Decide an approval; approve resumes the paused run. |
+| `GET`  | `/api/state` | Full demo state snapshot, including trusted and quarantined memory. |
+| `GET` | `/api/memory/trusted` · `/api/memory/quarantine` | Trusted retrieval and quarantined evidence views. |
+| `POST` | `/api/level3/demo-session` · `GET /api/level3/status` | Create and inspect the combined Level 3 proof session. |
+| `GET`  | `/api/vendors` · `/api/payments` · `/api/memory-entries` | Persisted state views. |
+| `POST` | `/api/reset?scope=demo|all` | Deterministically reset and re-seed demo state. |
+
+---
+
+## Ports
+
+| Service | Port | URL |
+|---------|------|-----|
+| Web UI | 3000 | http://localhost:3000 |
+| API | 8000 | http://localhost:8000 |
+| OPA | 8181 | internal only under Compose; `http://localhost:8181` when run locally |
+
+
+---
+
+## Final five-minute demo runbook
+
+Before presenting:
+
+```bash
+docker compose up --build -d
+python scripts/demo_check.py
+python scripts/reset.py
+```
+
+Then open http://localhost:3000 and use **Open 5-minute demo guide**:
+
+1. **Sign authority.** In Protected, compile the prefilled task, confirm the
+   contract, and sign it. Point out limits, forbidden actions, expiry, and valid
+   Ed25519 signature.
+2. **Show the attack.** Switch to Unprotected and run the malicious invoice. Show
+   the attacker payment, rogue vendor, poisoned memory, and redacted secret access.
+3. **Enforce and approve.** Return to Protected, run the same invoice, show the
+   gateway's `ALLOW`, `BLOCK`, and `REQUIRE_APPROVAL` decisions, then approve the
+   legitimate payment exactly once.
+4. **Prove integrity and breadth.** Run the tamper demonstration, then open
+   Evaluation and show 6/6 attacks prevented, 4/4 legitimate actions, observed
+   latency, provenance, and the stable repeatability key.
+5. **Show Level 3 briefly.** Open Level 3 and demonstrate that MCP shares the same
+   gateway, poisoned memory is quarantined and not retrievable, and the compiler
+   remains non-authoritative.
+
+Use deterministic mode for the primary presentation. A live-model attempt may
+fall back automatically; the UI labels fallback mode and authorization behavior
+remains unchanged.
+
+## Failure recovery and offline operation
+
+| Symptom | Expected behavior | Recovery |
+|---|---|---|
+| OPA is unavailable | `/health` stays live, `/ready` returns 503, protected actions block with `POLICY_UNAVAILABLE`, and no side effect occurs. | Restart OPA. The next protected request uses policy normally; no cached allow is used. |
+| Model key is absent, request times out, or response is malformed | A stable fallback reason is recorded and the deterministic plan runs. No provider exception is shown. | Continue the demo in deterministic fallback mode. |
+| Browser refreshes or SSE disconnects | The run ID and signed mandate are restored, persisted events reload, and SSE resumes after the last stable event ID. | Reopen the same workspace; do not rerun the action. |
+| Demo state is stale | The reset endpoint/CLI clears interactive state and re-seeds fixtures. | Click **RESET DEMO** or run `python scripts/reset.py`. |
+| Evaluation history must also be removed | Default reset intentionally preserves it. | Run `python scripts/reset.py --full`. |
+
+The offline presentation path needs no external model service. It uses bundled
+invoice fixtures, deterministic plans, SQLite, the local policy service, and the
+persistent demo signing key. Policy enforcement itself is never replaced by a
+Python fallback.
+
+## Rehearsal checklist
+
+Run these three rehearsals on the presentation machine:
+
+- **Normal:** start the full stack, reset, and complete the five-minute flow.
+- **Failure recovery:** refresh during a run or restart OPA, show fail-closed
+  behavior, then recover without editing code or the database.
+- **Offline:** remove the model key or disconnect external network access and
+  complete the same security proof using deterministic fallback.
+
+Before recording a backup demo, confirm the browser is at presentation zoom,
+notifications are disabled, the database is reset, all services are healthy,
+secret values remain redacted, the full flow is under five minutes, and the
+recording includes both the unprotected side effect and protected evidence. This
+repository does not claim that a recording exists; the checklist prepares the
+machine to create one.
+
+## Final verification commands
+
+```bash
+python -m pytest services/api/tests -q
+opa test policy
+python scripts/smoke_test.py --repetitions 3
+python scripts/smoke_level1.py --repetitions 3
+python scripts/smoke_level2.py --repetitions 3
+python scripts/smoke_level3.py --repetitions 3
+python scripts/smoke_level4.py --repetitions 3
+cd apps/web && npm run lint && npx tsc --noEmit && npm run build && npm audit
+cd ../.. && docker compose up --build -d
+python scripts/demo_check.py
+docker compose ps
+```

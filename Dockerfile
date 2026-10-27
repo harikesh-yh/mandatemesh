@@ -1,24 +1,18 @@
-FROM node:22-alpine AS dependencies
-WORKDIR /app
-COPY apps/web/package.json apps/web/package-lock.json ./
-RUN npm ci
+FROM python:3.14-slim
 
-FROM node:22-alpine AS builder
-WORKDIR /app
-COPY --from=dependencies /app/node_modules ./node_modules
-COPY apps/web .
-ARG NEXT_PUBLIC_API_URL=http://localhost:8000
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-RUN npm run build
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    MANDATEMESH_DATA_DIR=/app/data
 
-FROM node:22-alpine AS runner
-ENV NODE_ENV=production \
-    PORT=3000 \
-    HOSTNAME=0.0.0.0
 WORKDIR /app
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-EXPOSE 3000
-CMD ["node", "server.js"]
+COPY services/api/requirements.txt /tmp/requirements.txt
+RUN python -m pip install --no-cache-dir --only-binary=:all: -r /tmp/requirements.txt
+
+COPY services/api /app/services/api
+COPY scenarios /app/scenarios
+COPY scripts /app/scripts
+
+WORKDIR /app/services/api
+EXPOSE 8000
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
